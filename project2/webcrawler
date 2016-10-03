@@ -1,0 +1,279 @@
+#!/usr/bin/python
+import socket
+import sys
+import re
+import select
+
+# Maximum size to read from socket
+PAGE_SIZE = 4096
+# Number of processes
+WORKER_NUMBER = 100
+# Possible status of returned page
+STATUS_OK = '200'
+STATUS_REDIRECT = '301'
+STATUS_FOUND = '302'
+STATUS_FORBIDDEN = '403'
+STATUS_NOT_FOUND = '404'
+STATUS_INTERNAL_SERVER_ERROR = '500'
+# Status group according to needed operation
+STATUS_SUCCESS = [STATUS_OK]
+STATUS_REDIRECTION = [STATUS_REDIRECT, STATUS_FOUND]
+STATUS_CLIENT_ERROR = [STATUS_FORBIDDEN, STATUS_NOT_FOUND]
+STATUS_SERVER_ERROR = [STATUS_INTERNAL_SERVER_ERROR]
+
+class Worker(object):
+    """
+    Worker
+    """
+    def __init__(self, host, port, i):
+        self.host = host
+        self.port = port
+        self.write_buffer = ''
+        self.read_buffer = ''
+        self.state = 0 # 0 for write, 1 for read and -1 for error
+        self.target_url = None
+        self.socket = None
+        self.init_socket()
+        self.no = i
+
+    def init_socket(self):
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.connect((self.host, self.port))
+            self.socket.setblocking(False)
+        except Exception as e:
+            state = -1
+
+    def try_reset_worker(self):
+        try:
+            self.socket.shutdown(2)
+            self.socket.close()
+            self.connect()
+            self.read_buffer = ''
+            self.write_buffer = ''
+            self.state = 0
+        except Exception as e:
+            self.state = -1
+
+    def read(self):
+        try:
+            print 'Entering read()' + str(self.no)
+            resp = self.socket.recv(PAGE_SIZE)
+            if resp != 0: self.read_buffer += resp
+            if resp == 0 or resp == '' or self.read_buffer.endswith('\r\n\r\n') or self.read_buffer.endswith('</html>'):
+                print 'now should go to process_response' + str(self.no)
+                return self.process_response(self.read_buffer)
+        except Exception as e:
+            print 'exceptions in worker read:' + str(self.no)
+            self.try_reset_worker(e)
+            return set(), set(self.target_url), set()
+        return set(), set(), set()
+
+    def write(self, target_url, buffer):
+        if not self.write_buffer:
+            if not target_url and not buffer: return
+            self.write_buffer = buffer
+            self.target_url = target_url
+        try:
+            n = self.socket.send(self.write_buffer)
+            self.write_buffer = self.write_buffer[n:]
+            # Write is finished
+            if not self.write_buffer:
+                self.state = 1
+                self.write_buffer = ''
+            return True
+        except Exception as e:
+            self.try_reset_worker(e)
+            return False
+
+    def process_response(self, resp):
+        print "entering process_response" + str(self.no)
+        print resp
+        flags, to_visit, visited = set(), set(), set()
+
+        status_code = self.get_status_code(resp)
+        print 'status_code:' + status_code
+        if status_code in STATUS_SUCCESS:
+            flags = self.find_flags(resp)
+            to_visit = self.find_out_links(resp)
+            visited.add(self.target_url)
+        elif status_code in STATUS_REDIRECTION:
+            to_visit = self.find_redirect_location(resp)
+            visited.add(self.target_url)
+        elif status_code in STATUS_CLIENT_ERROR:
+            visited.add(self.target_url)
+        elif status_code in STATUS_SERVER_ERROR:
+            to_visit.add(self.target_url)
+
+        print 'after getting status_code' + str(self.no)
+        # Reconnect, so we can use this socket again
+        self.try_reset_worker()
+
+        print 'in process_response' + str(self.no)
+        print flags, to_visit, visited
+        return flags, to_visit, visited
+
+    def find_flags(self, resp):
+        return set(re.findall("FLAG: (.{64})", resp))
+
+    def find_out_links(self, resp):
+        print 'before parsing the outlinks: '
+        print resp
+        t = set(re.findall("<a href=\"(.*?)\">[^<]*</a>", resp))
+        print t
+        print 'after parsing the outlinks'
+        return t
+
+    def find_redirect_location(self, resp):
+        return set(re.findall("Location: (.*?)\r\n", resp))
+
+    def get_status_code(self, resp):
+        status_code = re.findall("HTTP/1.1 (.*?) ", resp)
+        return status_code[0] if status_code else ''
+
+    def fileno(self):
+        return self.socket.fileno()
+
+class MasterCrawler:
+    """
+    Master Crawler
+    """
+    def __init__(self):
+        self.cookies = ''
+        self.flags = set()
+        self.to_visit = set()
+        self.visited = set()
+        self.workers = []
+
+    def login(self, host, port, username, password):
+        counter = 10
+        while counter > 0:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((host, port))
+            resp = self.getLoginPage(host, s)
+            status_code = self.get_status_code(resp)
+            if status_code != STATUS_OK:
+                counter -= 1
+                continue
+
+            resp = self.postFakebookLogin(host, username, password, resp, s)
+            status_code = self.get_status_code(resp)
+            if status_code != STATUS_FOUND:
+                counter -= 1
+                continue
+
+            self.cookies = self.parseCookies(resp)
+            self.to_visit |= self.findFirstLocation(resp)
+            self.workers = [Worker(host, port, i) for i in range(WORKER_NUMBER)]
+            break
+        return counter > 0
+
+    def getLoginPage(self, host, s):
+        # url can also be /accounts/login/?next=/fakebook
+        # if without the /?next=/fakebook, it will be redirectly automatically
+        # This is the GET request that goes to the login page
+        get_fakebook_login_page = "GET /accounts/login/ HTTP/1.1\r\n" + \
+                                "Host: " + host + "\r\n\r\n"
+        print 'get_fakebook_login_page: '+get_fakebook_login_page
+        s.send(get_fakebook_login_page)
+        resp = s.recv(PAGE_SIZE)
+        return resp
+
+    def postFakebookLogin(self, host, username, password, resp, s):
+        # Parse out the csrftoken and sessionid
+        csrftoken = re.findall('csrftoken=(\w*)', resp)[0]
+        sessionid = re.findall('sessionid=(\w*)', resp)[0]
+
+        # This is the POST request that logins in the Fakebook homepage
+        login_request = "POST /accounts/login/ HTTP/1.1\r\n" + \
+                        "Host: {host}\r\n" + \
+                        "Content-Length: {length}\r\n" + \
+                        "Cookie: csrftoken={csrftoken}; sessionid={sid}\r\n\r\n"
+        formdata = "username={username}&password={password}&csrfmiddlewaretoken={csrf}&next=/fakebook/"\
+                    .format(username=username, password=password, csrf=csrftoken)
+        login_request = login_request.format(host=host, length=len(formdata), csrftoken=csrftoken, sid=sessionid)
+        s.send(login_request+formdata)
+        resp = s.recv(PAGE_SIZE)
+        print 'resp1: '+ resp
+        s.close()
+        return resp
+
+    def parseCookies(self, resp):
+        # Creates a dictionary that records down the keys and values of cookies
+        cookies_list = []
+        cookies = re.findall('Set-Cookie: [^=]*=(.*?);',resp)
+        keys = re.findall('Set-Cookie: (.*?)=',resp)
+        for key, cookie in zip(keys, cookies):
+            cookies_list.append(key + '=' + cookie)
+        cookies = '; '.join(cookies_list)
+        return cookies
+
+    def findFirstLocation(self, resp):
+        # In the response, there is a line: Location: http://cs5700f16.ccs.neu.edu/fakebook/
+        return set(re.findall('Location: (https?:\/\/(?:www\.|(?!www))[^\s\.]+\.[^\s]{2,}|www\.[^\s]+\.[^\s]{2,})', resp))
+
+    def get_status_code(self, resp):
+        print 'master resp in get_status_code: '
+        print resp
+        status_code = re.findall("HTTP/1.1 (.*?) ", resp)
+        return status_code[0] if status_code else ''
+
+    def startCrawling(self, host):
+        crawl_request = "GET {url} HTTP/1.1\r\n" + \
+                "Host: " + host + "\r\n" + \
+                "Cookie: " + self.cookies + "\r\n" + \
+                "Connection: keep-alive" + "\r\n\r\n"
+        while len(self.flags) < 5:
+            rlist = [worker for worker in self.workers if worker.state == 1]
+            wlist = [worker for worker in self.workers if worker.state == 0]
+
+            readables, writables, exceptions = select.select(rlist, wlist, [], 3)
+
+            if readables: self.process_read(readables)
+            if writables: self.process_write(writables, crawl_request)
+
+            # print('to_visit: %d\nflags: %d\nvisited: %d' % (len(self.to_visit), len(self.flags), len(self.visited)))
+
+        for flag in self.flags:
+            print flag
+
+    def process_read(self, readables):
+        i = 1
+        for worker in readables:
+            flags, to_visit, visited = worker.read()
+            self.flags |= flags
+            for url in to_visit:
+                if url not in self.visited and '/fakebook/' in url:
+                    print 'url in process_read'
+                    print url
+                    self.to_visit.add(url)
+            self.visited |= visited
+            # print 'worker in readables' + str(i)
+            i+=1
+
+    def process_write(self, writables, crawl_request):
+        for worker in writables:
+            target_url, request = '', ''
+            # Start a new worker writing task, if write buffer is empty
+            if not worker.write_buffer and len(self.to_visit) > 0:
+                target_url = self.to_visit.pop()
+                request = crawl_request.format(url = target_url)
+            if not worker.write(target_url, request):
+                self.to_visit.add(target_url)
+
+def read_arguments():
+    if len(sys.argv) != 3:
+        print "Invalid password and username"
+        sys.exit()
+    username, password = sys.argv[1], sys.argv[2]
+    return username, password
+
+if __name__ == '__main__':
+    host = "cs5700f16.ccs.neu.edu"
+    port = 80
+    username, password = read_arguments()
+    crawler = MasterCrawler()
+    if not crawler.login(host, port, username, password):
+        print "Error login"
+        sys.exit()
+    crawler.startCrawling(host)
