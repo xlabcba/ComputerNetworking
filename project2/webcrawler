@@ -23,7 +23,15 @@ STATUS_SERVER_ERROR = [STATUS_INTERNAL_SERVER_ERROR]
 
 class Worker(object):
     """
-    Worker
+    Each worker wraps a socket.
+    The state of worker can be:
+    0 - write mode ; 1 - read mode; -1 - error mode;
+    Worker runs in following mechanism:
+    1. Initialized in write mode, and wait for writing job from Master Crawler.
+    2. Assigned writing job from Master Crawler, and keep working on it.
+    3. After finish writing, switch to read mode to read the response page.
+    4. After finish reading, analyze the response, and return result to Master Crawler.
+    5. Reset to initial state and repeat step 1.
     """
     def __init__(self, host, port, i):
         self.host = host
@@ -46,25 +54,22 @@ class Worker(object):
 
     def try_reset_worker(self):
         try:
-            self.socket.shutdown(2)
-            self.socket.close()
-            self.connect()
+            self.state = 0
             self.read_buffer = ''
             self.write_buffer = ''
-            self.state = 0
+            self.socket.shutdown(2)
+            self.socket.close()
+            self.init_socket()
         except Exception as e:
             self.state = -1
 
     def read(self):
         try:
-            print 'Entering read()' + str(self.no)
             resp = self.socket.recv(PAGE_SIZE)
             if resp != 0: self.read_buffer += resp
             if resp == 0 or resp == '' or self.read_buffer.endswith('\r\n\r\n') or self.read_buffer.endswith('</html>'):
-                print 'now should go to process_response' + str(self.no)
                 return self.process_response(self.read_buffer)
         except Exception as e:
-            print 'exceptions in worker read:' + str(self.no)
             self.try_reset_worker(e)
             return set(), set(self.target_url), set()
         return set(), set(), set()
@@ -87,12 +92,9 @@ class Worker(object):
             return False
 
     def process_response(self, resp):
-        print "entering process_response" + str(self.no)
-        print resp
         flags, to_visit, visited = set(), set(), set()
 
         status_code = self.get_status_code(resp)
-        print 'status_code:' + status_code
         if status_code in STATUS_SUCCESS:
             flags = self.find_flags(resp)
             to_visit = self.find_out_links(resp)
@@ -105,24 +107,16 @@ class Worker(object):
         elif status_code in STATUS_SERVER_ERROR:
             to_visit.add(self.target_url)
 
-        print 'after getting status_code' + str(self.no)
         # Reconnect, so we can use this socket again
         self.try_reset_worker()
 
-        print 'in process_response' + str(self.no)
-        print flags, to_visit, visited
         return flags, to_visit, visited
 
     def find_flags(self, resp):
         return set(re.findall("FLAG: (.{64})", resp))
 
     def find_out_links(self, resp):
-        print 'before parsing the outlinks: '
-        print resp
-        t = set(re.findall("<a href=\"(.*?)\">[^<]*</a>", resp))
-        print t
-        print 'after parsing the outlinks'
-        return t
+        return set(re.findall("<a href=\"(.*?)\">[^<]*</a>", resp))
 
     def find_redirect_location(self, resp):
         return set(re.findall("Location: (.*?)\r\n", resp))
@@ -153,6 +147,8 @@ class MasterCrawler:
             resp = self.getLoginPage(host, s)
             status_code = self.get_status_code(resp)
             if status_code != STATUS_OK:
+                print "get login page: \n"
+                print resp
                 counter -= 1
                 continue
 
@@ -160,6 +156,8 @@ class MasterCrawler:
             status_code = self.get_status_code(resp)
             if status_code != STATUS_FOUND:
                 counter -= 1
+                print "post to login: \n"
+                print resp
                 continue
 
             self.cookies = self.parseCookies(resp)
@@ -173,8 +171,7 @@ class MasterCrawler:
         # if without the /?next=/fakebook, it will be redirectly automatically
         # This is the GET request that goes to the login page
         get_fakebook_login_page = "GET /accounts/login/ HTTP/1.1\r\n" + \
-                                "Host: " + host + "\r\n\r\n"
-        print 'get_fakebook_login_page: '+get_fakebook_login_page
+                                  "Host: " + host + "\r\n\r\n"
         s.send(get_fakebook_login_page)
         resp = s.recv(PAGE_SIZE)
         return resp
@@ -194,7 +191,6 @@ class MasterCrawler:
         login_request = login_request.format(host=host, length=len(formdata), csrftoken=csrftoken, sid=sessionid)
         s.send(login_request+formdata)
         resp = s.recv(PAGE_SIZE)
-        print 'resp1: '+ resp
         s.close()
         return resp
 
@@ -213,8 +209,6 @@ class MasterCrawler:
         return set(re.findall('Location: (https?:\/\/(?:www\.|(?!www))[^\s\.]+\.[^\s]{2,}|www\.[^\s]+\.[^\s]{2,})', resp))
 
     def get_status_code(self, resp):
-        print 'master resp in get_status_code: '
-        print resp
         status_code = re.findall("HTTP/1.1 (.*?) ", resp)
         return status_code[0] if status_code else ''
 
@@ -232,24 +226,20 @@ class MasterCrawler:
             if readables: self.process_read(readables)
             if writables: self.process_write(writables, crawl_request)
 
-            # print('to_visit: %d\nflags: %d\nvisited: %d' % (len(self.to_visit), len(self.flags), len(self.visited)))
-
+        print "All flags: \r\n"
         for flag in self.flags:
             print flag
 
     def process_read(self, readables):
-        i = 1
         for worker in readables:
             flags, to_visit, visited = worker.read()
+            new_flags = flags - self.flags
+            for flag in new_flags: print flag
             self.flags |= flags
             for url in to_visit:
                 if url not in self.visited and '/fakebook/' in url:
-                    print 'url in process_read'
-                    print url
                     self.to_visit.add(url)
             self.visited |= visited
-            # print 'worker in readables' + str(i)
-            i+=1
 
     def process_write(self, writables, crawl_request):
         for worker in writables:
@@ -263,7 +253,7 @@ class MasterCrawler:
 
 def read_arguments():
     if len(sys.argv) != 3:
-        print "Invalid password and username"
+        print "Invalid Command"
         sys.exit()
     username, password = sys.argv[1], sys.argv[2]
     return username, password
