@@ -33,17 +33,19 @@ class Worker(object):
     4. After finish reading, analyze the response, and return result to Master Crawler.
     5. Reset to initial state and repeat step 1.
     """
+    # Initialize worker
     def __init__(self, host, port, i):
         self.host = host
         self.port = port
+        self.state = 0
         self.write_buffer = ''
         self.read_buffer = ''
-        self.state = 0 # 0 for write, 1 for read and -1 for error
-        self.target_url = None
+        self.target_url = ''
         self.socket = None
         self.init_socket()
         self.no = i
 
+    # Initialize socket
     def init_socket(self):
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -51,32 +53,45 @@ class Worker(object):
             self.socket.setblocking(False)
         except Exception as e:
             state = -1
-
+            
+    # Reset worker to be reused
     def try_reset_worker(self):
         try:
             self.state = 0
             self.read_buffer = ''
             self.write_buffer = ''
+            self.target_url
             self.socket.shutdown(2)
             self.socket.close()
             self.init_socket()
         except Exception as e:
             self.state = -1
 
+    # Do read task
     def read(self):
         try:
             resp = self.socket.recv(PAGE_SIZE)
             if resp != 0: self.read_buffer += resp
-            if resp == 0 or resp == '' or self.read_buffer.endswith('\r\n\r\n') or self.read_buffer.endswith('</html>'):
+            # Read is finished
+            if resp == 0 or resp == '' or \
+               self.read_buffer.endswith('\r\n\r\n') or \
+               self.read_buffer.endswith('</html>'):
+                # Process read page
                 return self.process_response(self.read_buffer)
         except Exception as e:
+            # If failed to read, reset worker, and
+            # add target_url back to to_visit
             self.try_reset_worker()
             return set(), set(self.target_url), set()
         return set(), set(), set()
 
+    # Do write task
     def write(self, target_url, buffer):
+        # Check if the worker is idle to be assigned a new task
         if not self.write_buffer:
+            # Check if no task to do at this moment
             if not target_url and not buffer: return
+            # Assign new task to current idle worker
             self.write_buffer = buffer
             self.target_url = target_url
         try:
@@ -86,11 +101,14 @@ class Worker(object):
             if not self.write_buffer:
                 self.state = 1
                 self.write_buffer = ''
-            return True
+            return ''
         except Exception as e:
+            # If failed to read, reset worker, and
+            # add target_url back to to_visit
             self.try_reset_worker()
-            return False
+            return self.target_url
 
+    # Analyze read page
     def process_response(self, resp):
         flags, to_visit, visited = set(), set(), set()
 
@@ -112,26 +130,43 @@ class Worker(object):
 
         return flags, to_visit, visited
 
+    # Find flags in read page
     def find_flags(self, resp):
         return set(re.findall("FLAG: (.{64})", resp))
 
+    # Find hyperlinks to visit in read page
     def find_out_links(self, resp):
         return set(re.findall("<a href=\"(.*?)\">[^<]*</a>", resp))
 
+    # Find locations to visit in read page
     def find_redirect_location(self, resp):
         return set(re.findall("Location: (.*?)\r\n", resp))
 
+    # Find status code of read page
     def get_status_code(self, resp):
         status_code = re.findall("HTTP/1.1 (.*?) ", resp)
         return status_code[0] if status_code else ''
 
+    # Necessary to operate socket
     def fileno(self):
         return self.socket.fileno()
 
 class MasterCrawler:
     """
-    Master Crawler
+    Master Crawler is the main port of crawling.
+    It works as following:
+    1. Tries to login fakebook account, and records the cookies
+       for the following requests, and first location to visit.
+    2. Executes as an asynchronous process, which efficiently select
+       readable and writable worker list. Assign new task to empty
+       workers.
+    3. Maintains a set of found flags, a set as stack of url paths to
+       visit, and a set of url paths which have been visited. After each
+       worker returns found flags, to-visit paths and visited path, Master
+       Crawler merges the result into these three corresponding list.
+    4. Finishes the process and return when 5 flags have all been found.
     """
+    # Initialize Master Crawler
     def __init__(self):
         self.cookies = ''
         self.flags = set()
@@ -139,6 +174,52 @@ class MasterCrawler:
         self.visited = set()
         self.workers = []
 
+    # Do asynchronous crawling process
+    def startCrawling(self, host):
+        crawl_request = "GET {url} HTTP/1.1\r\n" + \
+                "Host: " + host + "\r\n" + \
+                "Cookie: " + self.cookies + "\r\n" + \
+                "Connection: keep-alive" + "\r\n\r\n"
+        while len(self.flags) < 5:
+            rlist = [worker for worker in self.workers if worker.state == 1]
+            wlist = [worker for worker in self.workers if worker.state == 0]
+
+            readables, writables, exceptions = select.select(rlist, wlist, [], 3)
+
+            if readables: self.process_read(readables)
+            if writables: self.process_write(writables, crawl_request)
+
+    # Iterate readable workers
+    def process_read(self, readables):
+        for worker in readables:
+            flags, to_visit, visited = worker.read()
+            # Print new flags if found
+            new_flags = flags - self.flags
+            for flag in new_flags: print flag
+            # Update flags
+            self.flags |= flags
+            # Update to_visit paths
+            for url in to_visit:
+                # Add url path if it hasn't been visited
+                # and belongs to the required domain
+                if url not in self.visited and '/fakebook/' in url:
+                    self.to_visit.add(url)
+            # Update visited paths
+            self.visited |= visited
+
+    # Iterate writable workers
+    def process_write(self, writables, crawl_request):
+        for worker in writables:
+            target_url, request = '', ''
+            # Start a new worker writing task, if write buffer is empty
+            if not worker.write_buffer and len(self.to_visit) > 0:
+                target_url = self.to_visit.pop()
+                request = crawl_request.format(url = target_url)
+            # If worker failed to write, add the target url back into to_visit
+            to_visit = worker.write(target_url, request)
+            if to_visit: self.to_visit.add(to_visit)
+
+    # Do login process
     def login(self, host, port, username, password):
         counter = 10
         while counter > 0:
@@ -164,6 +245,7 @@ class MasterCrawler:
             break
         return counter > 0
 
+    # First GET to get login page
     def getLoginPage(self, host, port):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((host, port))
@@ -183,6 +265,7 @@ class MasterCrawler:
         s.close
         return ''.join(resp_lst)
 
+    # First POST to login into account
     def postFakebookLogin(self, host, port, username, password, resp):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((host, port))
@@ -209,6 +292,7 @@ class MasterCrawler:
         s.close()
         return ''.join(resp_lst)
 
+    # Find cookies to be used in following crawling
     def parseCookies(self, resp):
         # Creates a dictionary that records down the keys and values of cookies
         cookies_list = []
@@ -219,49 +303,17 @@ class MasterCrawler:
         cookies = '; '.join(cookies_list)
         return cookies
 
+    # Find first location to visit
     def findFirstLocation(self, resp):
         # In the response, there is a line: Location: http://cs5700f16.ccs.neu.edu/fakebook/
         return set(re.findall('Location: (https?:\/\/(?:www\.|(?!www))[^\s\.]+\.[^\s]{2,}|www\.[^\s]+\.[^\s]{2,})', resp))
 
+    # Find status code of page
     def get_status_code(self, resp):
         status_code = re.findall("HTTP/1.1 (.*?) ", resp)
         return status_code[0] if status_code else ''
 
-    def startCrawling(self, host):
-        crawl_request = "GET {url} HTTP/1.1\r\n" + \
-                "Host: " + host + "\r\n" + \
-                "Cookie: " + self.cookies + "\r\n" + \
-                "Connection: keep-alive" + "\r\n\r\n"
-        while len(self.flags) < 5:
-            rlist = [worker for worker in self.workers if worker.state == 1]
-            wlist = [worker for worker in self.workers if worker.state == 0]
-
-            readables, writables, exceptions = select.select(rlist, wlist, [], 3)
-
-            if readables: self.process_read(readables)
-            if writables: self.process_write(writables, crawl_request)
-
-    def process_read(self, readables):
-        for worker in readables:
-            flags, to_visit, visited = worker.read()
-            new_flags = flags - self.flags
-            for flag in new_flags: print flag
-            self.flags |= flags
-            for url in to_visit:
-                if url not in self.visited and '/fakebook/' in url:
-                    self.to_visit.add(url)
-            self.visited |= visited
-
-    def process_write(self, writables, crawl_request):
-        for worker in writables:
-            target_url, request = '', ''
-            # Start a new worker writing task, if write buffer is empty
-            if not worker.write_buffer and len(self.to_visit) > 0:
-                target_url = self.to_visit.pop()
-                request = crawl_request.format(url = target_url)
-            if not worker.write(target_url, request):
-                self.to_visit.add(target_url)
-
+# Parse system argument
 def read_arguments():
     if len(sys.argv) != 3:
         print "Invalid Command"
