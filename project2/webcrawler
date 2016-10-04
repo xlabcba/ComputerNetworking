@@ -53,7 +53,7 @@ class Worker(object):
             self.socket.setblocking(False)
         except Exception as e:
             state = -1
-            
+
     # Reset worker to be reused
     def try_reset_worker(self):
         try:
