@@ -70,7 +70,7 @@ class Worker(object):
             if resp == 0 or resp == '' or self.read_buffer.endswith('\r\n\r\n') or self.read_buffer.endswith('</html>'):
                 return self.process_response(self.read_buffer)
         except Exception as e:
-            self.try_reset_worker(e)
+            self.try_reset_worker()
             return set(), set(self.target_url), set()
         return set(), set(), set()
 
@@ -88,7 +88,7 @@ class Worker(object):
                 self.write_buffer = ''
             return True
         except Exception as e:
-            self.try_reset_worker(e)
+            self.try_reset_worker()
             return False
 
     def process_response(self, resp):
@@ -142,9 +142,7 @@ class MasterCrawler:
     def login(self, host, port, username, password):
         counter = 10
         while counter > 0:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((host, port))
-            resp = self.getLoginPage(host, s)
+            resp = self.getLoginPage(host, port)
             status_code = self.get_status_code(resp)
             if status_code != STATUS_OK:
                 print "get login page: \n"
@@ -152,7 +150,7 @@ class MasterCrawler:
                 counter -= 1
                 continue
 
-            resp = self.postFakebookLogin(host, username, password, resp, s)
+            resp = self.postFakebookLogin(host, port, username, password, resp)
             status_code = self.get_status_code(resp)
             if status_code != STATUS_FOUND:
                 counter -= 1
@@ -166,17 +164,28 @@ class MasterCrawler:
             break
         return counter > 0
 
-    def getLoginPage(self, host, s):
+    def getLoginPage(self, host, port):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((host, port))
         # url can also be /accounts/login/?next=/fakebook
         # if without the /?next=/fakebook, it will be redirectly automatically
         # This is the GET request that goes to the login page
         get_fakebook_login_page = "GET /accounts/login/ HTTP/1.1\r\n" + \
                                   "Host: " + host + "\r\n\r\n"
         s.send(get_fakebook_login_page)
-        resp = s.recv(PAGE_SIZE)
-        return resp
+        # While loop to read all data
+        resp_lst = []
+        while True:
+            curr = s.recv(PAGE_SIZE)
+            if curr == 0 or curr == '': break
+            resp_lst.append(curr)
+        s.shutdown(2)
+        s.close
+        return ''.join(resp_lst)
 
-    def postFakebookLogin(self, host, username, password, resp, s):
+    def postFakebookLogin(self, host, port, username, password, resp):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((host, port))
         # Parse out the csrftoken and sessionid
         csrftoken = re.findall('csrftoken=(\w*)', resp)[0]
         sessionid = re.findall('sessionid=(\w*)', resp)[0]
@@ -190,9 +199,15 @@ class MasterCrawler:
                     .format(username=username, password=password, csrf=csrftoken)
         login_request = login_request.format(host=host, length=len(formdata), csrftoken=csrftoken, sid=sessionid)
         s.send(login_request+formdata)
-        resp = s.recv(PAGE_SIZE)
+        # While loop to read all data
+        resp_lst = []
+        while True:
+            curr = s.recv(PAGE_SIZE)
+            if curr == 0 or curr == '': break
+            resp_lst.append(curr)
+        s.shutdown(2)
         s.close()
-        return resp
+        return ''.join(resp_lst)
 
     def parseCookies(self, resp):
         # Creates a dictionary that records down the keys and values of cookies
@@ -225,10 +240,6 @@ class MasterCrawler:
 
             if readables: self.process_read(readables)
             if writables: self.process_write(writables, crawl_request)
-
-        print "All flags: \r\n"
-        for flag in self.flags:
-            print flag
 
     def process_read(self, readables):
         for worker in readables:
