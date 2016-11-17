@@ -19,40 +19,38 @@ The following figure shows the layer structure and all functions implmented in e
 —————————————————————————————————————
              ^
              | (api)
-Http:        |            => HTTP get request, parse the url, 
-download     |              remove header, remove chuck length, save files
+Http:        |       => HTTP get request, parse the url, 
+download     |          remove header, remove chuck length, save files
 ————————————————————————————————————————————
 |application(application.py) Http(String)  |
 ————————————————————————————————————————————
              ^
              | (api)
-Tcp:         |           => three way handshake, send tcp packet, receive tcp packet
-send, recv,  |              time out, congestion control, out-order packet dealing
-connect,close|              retransmission, TCP packet checksum validation
-
+Tcp:         |       => three way handshake, send tcp packet, receive tcp packet
+send, recv,  |          time out, congestion control, out-order packet dealing
+connect,close|          retransmission, TCP packet checksum validation
 —————————————————————————————————————
 |transport(transport.py) TcpPacket  |    
 —————————————————————————————————————
              ^
-             | (api)
-Ip:          |      => send ip packet, receive ip packet, filter the packet by 
-send, recv   |         packet type, IP packet checksum validation
-close        |
+             | 
+Ip:          | (api)     
+send, recv   |       => send ip packet, receive ip packet, filter the packet by 
+close        |          packet type, IP packet checksum validation
 —————————————————————————————————————
 |network(network.py)     IpPacket   |
 —————————————————————————————————————
              ^
              | (api)
-Datalink:    |      => ARP the gateway MAC address by its ip, send ethernet packet,
-send, recv   |         receive ethernet packet
+Datalink:    |       => ARP the gateway MAC address by its ip, send ethernet packet,
+send, recv   |          receive ethernet packet
 —————————————————————————————————————
 |datalink(datalink.py)   EtherPacket|
 —————————————————————————————————————
              ^
-             | (api)
-AF_PACKET,   |   => basic data sending and receiving
-RAW_SOCK,    |
-sendto,      |
+AF_PACKET,   |  (api)
+RAW_SOCK,    |      
+sendto,      |       => basic data sending and receiving
 recvfrom     |
 —————————————————————————————
 |  OS(linux)	            |
@@ -60,6 +58,7 @@ recvfrom     |
 ```
 
 ## Features Implemented:
+
 ### TCP:
 We implemented the TCP pack header, checksum of incoming TCP segments and generate correct checksums for outgoing segments. Perform the three-way handshake before sending the HTTP GET request and deal with the connection teardown. Sort out-of-order segments in the correct order and discard duplicate segments.
 
