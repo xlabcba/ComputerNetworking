@@ -188,7 +188,7 @@ class Datalink:
         print 'mac_addresses: ', mac_addresses
 
         # remove all the ':' in the result
-        return mac_addresses[1].replace(":", "")
+        return mac_addresses[0].replace(":", "")
 
     def send(self, raw_packet):
         '''
