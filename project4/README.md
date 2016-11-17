@@ -84,3 +84,10 @@ We implemented the Data Link Layer by wrapping the two raw sockets, one for send
 	```
 
 * Have to get the data link protocol exactly right during Ethernet frame assembling
+
+## NOTE
+For DataLink layer, Ethernet interface device name differs in different machine.
+On my VMware Virtual Machine, it is ‘eno16777736’.
+A lot of other machines have it as ‘eth0’.
+Please check your number by calling ‘ifconfig’ and replace the value in datalink.py before running.
+
