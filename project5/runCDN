@@ -1,0 +1,59 @@
+#! /bin/bash
+hosts = (ec2-54-210-1-206.compute-1.amazonaws.com
+         ec2-54-67-25-76.us-west-1.compute.amazonaws.com
+         ec2-35-161-203-105.us-west-2.compute.amazonaws.com
+         ec2-52-213-13-179.eu-west-1.compute.amazonaws.com
+         ec2-52-196-161-198.ap-northeast-1.compute.amazonaws.com
+         ec2-54-255-148-115.ap-southeast-1.compute.amazonaws.com
+         ec2-13-54-30-86.ap-southeast-2.compute.amazonaws.com
+         ec2-52-67-177-90.sa-east-1.compute.amazonaws.com
+         ec2-35-156-54-135.eu-central-1.compute.amazonaws.com)
+# ??? original
+
+while getopts "p:o:u:n:i:" arg
+do
+    case $arg in
+        p) # Port
+            # echo "port:$OPTARG"
+            port=$OPTARG
+            ;;
+        o) # Origin server
+            # echo "origin:$OPTARG"
+            origin=$OPTARG
+            ;;
+        u) # username
+            # echo "username:$OPTARG"
+            username=$OPTARG
+            ;;
+        n) # CDN-specific name
+            # echo "name:$OPTARG"
+            name=$OPTARG
+            ;;
+        i) #private key
+            # echo "keyfile:$OPTARG"
+            keyfile=$OPTARG
+            ;;
+        ?)
+            echo "unknown argument"
+        exit 1
+        ;;
+        esac
+done
+
+
+for host in "${hosts[@]}"
+do
+    echo $host
+    # Run server in the background on target machine
+    # Refer to: http://goo.gl/Tp23ww                #pingSever executable?
+    ssh -i $keyfile $username@$host 'nohup killall python > /dev/null 2>&1 &'
+    ssh -i $keyfile -n -f $username@$host "sh -c 'cd ~/scripts/; chmod 700 dnsserver; nohup python pingServer.py > /dev/null 2>&1 &'"
+    ssh -i $keyfile -n -f $username@$host "sh -c 'cd ~/scripts/; chmod 700 httpserver; nohup ./httpserver -p $port -o $origin > /dev/null 2>&1 &'"
+ENDSSH
+done
+
+dnsserver = cs5700cdnproject.ccs.neu.edu
+echo $dnsserver
+# ssh -i $keyfile -n -f xlabcba@$dnsserver "sh -c 'cd ~/scripts/; nohup ./dnsserver -p $port -n $name > /dev/null 2>&1 &'"
+ssh -i $keyfile -n -f $username@$dnsserver "sh -c 'cd ~/scripts/; chmod 700 dnsserver; nohup ./dnsserver -p $port -n $name > /dev/null 2>&1 &'"
+ENDSSH

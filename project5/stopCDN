@@ -1,0 +1,49 @@
+#! /bin/bash
+hosts = (ec2-54-210-1-206.compute-1.amazonaws.com
+         ec2-54-67-25-76.us-west-1.compute.amazonaws.com
+         ec2-35-161-203-105.us-west-2.compute.amazonaws.com
+         ec2-52-213-13-179.eu-west-1.compute.amazonaws.com
+         ec2-52-196-161-198.ap-northeast-1.compute.amazonaws.com
+         ec2-54-255-148-115.ap-southeast-1.compute.amazonaws.com
+         ec2-13-54-30-86.ap-southeast-2.compute.amazonaws.com
+         ec2-52-67-177-90.sa-east-1.compute.amazonaws.com
+         ec2-35-156-54-135.eu-central-1.compute.amazonaws.com)
+# ??? original
+
+while getopts "p:o:u:n:i:" arg
+do
+    case $arg in
+        p) # Port
+            # echo "port:$OPTARG"
+            ;;
+        o) # Origin server
+            # echo "origin:$OPTARG"
+            ;;
+        u) # username
+            username=$OPTARG
+            # echo "username:$OPTARG"
+            ;;
+        n) # CDN-specific name
+            # echo "name:$OPTARG"
+            ;;
+        i) #private key
+            keyfile=$OPTARG
+            # echo "keyfile:$OPTARG"
+            ;;
+        ?)
+            echo "unknown argument"
+        exit 1
+        ;;
+        esac
+done
+
+for host in "${hosts[@]}"
+do
+    echo 'Closeing:' $host
+    ssh -i $keyfile $username@$host 'killall python > /dev/null 2>&1 &'
+done
+
+dnsserver=cs5700cdnproject.ccs.neu.edu
+echo "Closeing:" $dnsserver
+# ssh -i $keyfile xlabcba@$dnsserver 'killall python'
+ssh -i $keyfile $username@$dnsserver 'killall python > /dev/null 2>&1 &'
