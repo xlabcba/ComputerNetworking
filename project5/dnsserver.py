@@ -2,6 +2,9 @@ import sys
 import SocketServer
 import struct
 import socket
+# import constants
+import json
+from map import select_replica
 
 class Packet():
     def buildPacket(self, ip):
@@ -59,27 +62,68 @@ class MyDNSHandler(SocketServer.BaseRequestHandler):
         packet = Packet()
         packet.unpackPacket(data)
 
-        print 'server name: ', self.server.name
-        print 'packet.q_name: ', packet.q_name
-        print 'packet.q_type: ', packet.q_type
         if packet.q_type == 1 and packet.q_name == self.server.name:
             print "DEBUG: Should reply to: " + str(self.client_address)
-            ip = self.select_best_replica(self.client_address)
+            # ip = self.server.mapContacter.select_best_replica(self.client_address)
+            ip = select_replica('129.10.117.186')
             response = packet.buildPacket(ip)
 
             sock.sendto(response, self.client_address)
+            # self.server.mapContacter.addClient( self.client_address )
 
-    def select_best_replica(self, client_address):
-        return "1.2.3.4"
 
+# class MapContacter:
+#     def __init__( self, port ):
+#         self.UDP_IP = socket.gethostbyname( constants.UDP_IP )
+#         self.UDP_PORT = port
+
+#         self.sock = socket.socket(socket.AF_INET, # Internet
+#                                 socket.SOCK_DGRAM) # UDP
+
+#         # We don't want the socket to be blocked.
+#         self.sock.setblocking( 0 )
+
+#     def addClient( self, client_ip ):
+#         packet = json.dumps( {constants._DNS :
+#                                     {"TYPE" : constants._PUT_CLIENT,
+#                                      "CONTENT": client_ip[ 0 ]  #IP only.
+#                                     }
+#                             } )
+#         self.sock.sendto( packet, ( self.UDP_IP, self.UDP_PORT ) )
+
+#     def select_best_replica( self, client_ip ):
+#         try:
+#             packet = json.dumps( {constants._DNS :
+#                                         {"TYPE" : constants._GET_REPLICA,
+#                                          "CONTENT": client_ip[ 0 ]  #IP only.
+#                                         }
+#                                 } )
+#             self.sock.sendto( packet, ( self.UDP_IP, self.UDP_PORT ) )
+
+#             print 'packet', packet
+
+#             packet, addr = self.sock.recvfrom(1024) # buffer size is 1024 bytes
+#             data = json.loads( packet )
+
+#             print 'json data: ', data
+
+#             if data.has_key( constants._DNS ) and data[ constants._DNS ][ "TYPE" ] == constants._OK:
+#                 return data[ constants._DNS ][ "CONTENT" ]
+#         except socket.error:
+#             # default replica.
+#             print "TIMEOUT: replying with default replica."
+#             return "54.174.6.90"
 
 class DNSServer(SocketServer.UDPServer):
-    def __init__(self, name, port, handler = MyDNSHandler):
+    def __init__(self, name, port):
         self.name = name
-        SocketServer.UDPServer.__init__(self, ('', port), handler)
+        SocketServer.UDPServer.__init__(self, ('', port), MyDNSHandler)
+        # self.mapContacter = MapContacter( port + 2 )
+
         return
 
 def getPortAndName(argv):
+    print argv
     if len(argv) != 5 or argv[1] != "-p" or argv[3] != "-n":
         sys.exit("Usage: ./dnsserver -p [port] -n [name]")
     port = int(argv[2])
@@ -87,10 +131,7 @@ def getPortAndName(argv):
 
     return port, name
 
-def main(argv):
-    port, name = getPortAndName(argv)
+if __name__ == '__main__':
+    port, name = getPortAndName(sys.argv)
     dns_server = DNSServer(name, port)
     dns_server.serve_forever()
-
-if __name__ == '__main__':
-    main(sys.argv)
